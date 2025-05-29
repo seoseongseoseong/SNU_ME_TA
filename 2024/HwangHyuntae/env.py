@@ -9,23 +9,32 @@ from scipy.interpolate import RegularGridInterpolator
 
 ## 23년식 가솔린 터보 1.6 하이브리드 2WD / 5인승
 ## https://www.kiamedia.com/us/en/models/sorento-hev/2023/specifications
-class MQ4: ## car_config
-    Mass = 1775         # Vehicle mass (kg)
-    wheel_R = 0.3       # Wheel radius (m)
-    gravity = 9.81      # Gravitational constant (m/s^2)
-    drag_coeff = 0.35   # Aerodynamic drag coefficient
-    rho_air = 1.225     # Air density (kg/m^3)
-    Area_front = 2.7829 # Frontal area (m^2)
-    roll_coeff = 0.015  # Rolling resistance coefficient
-    tau_belt = 1        # belt ratio
-    tau_fdr = 3.5       # final drive ratio
-    battery_cap = 1.5   # capacity of the battery (kWh)
-    I_aux = 0.0         # auxiliary current (A) // assume none
-    # I_bias = 1          # constant current bias
-    # alpha = 1           # road grade (slope of the road)  ## time variant, depends on the road condition
-    w_stall = 40.8     # minimum engine speed not to stall // rad/s
-    w_idle = 136       # speed without giving any power // rad/s // TODO ref - 1,300 RPM = 136.135682 rad/s
 
+# (mass, battery_cap, wheel_R, Area_front)
+## Guide Auto Web, “2023 Kia Sorento HEV LX Specifications,” The Car Guide. [Online]. Available: https://www.guideautoweb.com/en/makes/kia/sorento/2023/specifications/hev-lx/. [Accessed: May 22, 2025].
+class MQ4: ## car_config
+    gravity = 9.81      # Gravitational constant (m/s^2)
+    drag_coeff = 0.32   # Aerodynamic drag coefficient
+    # -> Kia Corporation, *2022 Sorento Specifications Sheet*, Jan. 2022. [Online]. Available: https://www.kia.com/content/dam/kwcms/sg/en/pdf/Brochure/Brochure_Specs/SorentoBrochureSpecsSheet_Jan2022.pdf
+    rho_air = 1.204     # Air density (kg/m^3)
+    roll_coeff = 0.015  # Rolling resistance coefficient
+    # -> T. D. Gillespie, *Fundamentals of Vehicle Dynamics*, Warrendale, PA: Society of Automotive Engineers, 1992, p. 117. ISBN: 1-56091-199-9.
+    I_aux = 0.0         # auxiliary current (A) // assume none!
+
+    # need Actual values
+    Mass = 1869         # Vehicle mass (kg) *checked!
+    wheel_R = 0.36865   # Wheel radius (m)   P235/65R17  *checked!
+    Area_front = 3.2205 # Frontal area, H*W = 1.695 * 1.9 (m^2) *checked!
+    tau_belt = 1        # belt ratio
+    eta_belt = 0.95     # belt efficiency motorshaft -> crankshaft
+    tau_fdr = 3.510     # final drive ratio *checked!
+    # -> Kia America, “2023 Sorento HEV Specifications,” Kia Media. [Online]. Available: https://www.kiamedia.com/us/en/models/sorento-hev/2023/specifications. [Accessed: May 22, 2025]
+    battery_cap = 1.5   # capacity of the battery (kWh) *checked!
+    w_stall = 40.8      # minimum engine speed not to stall // rad/s
+    w_idle = 83.775804  # speed without giving any power // rad/s (ref - 800 RPM) *checked!
+    # -> “Idle (engine),” Wikipedia. [Online]. Available: https://en.wikipedia.org/wiki/Idle_(engine). [Accessed: May 22, 2025].
+
+# **wheel diameter = P235/65R17 -> (235*0.65*2+17*25.4) = 737.3mm, wheel radius = 737.3mm /1000 /2 = 0.36865m
 
 class HEV(gym.Env):
     def __init__(self, start_time=0, step_size=1, config=None, profile_name='wltp.csv') -> None:
@@ -52,7 +61,8 @@ class HEV(gym.Env):
         self.reward = None
         self.done = False
 
-
+        # for torque slew rate limit
+        self.prev_T_eng = 0.0 # prev step engine torque
 
     #------------------------- space limitation ------------------------ #
         self.observation_space = gym.spaces.Box(
@@ -130,6 +140,7 @@ class HEV(gym.Env):
 
     # get gear ratio using gear number
     def gear_ratio(self, n_gear):
+    ## https://www.kiamedia.com/us/en/models/sorento-hev/2023/specifications
         tau_gear = {
             1: 4.639,
             2: 2.826,
@@ -139,6 +150,21 @@ class HEV(gym.Env):
             6: 0.772,
         }
         return tau_gear[n_gear]
+    
+    def get_engine_ramp_rate(self, v_veh: float) -> float:
+        """
+        현재 속도(v_veh, m/s)에 따른 엔진 토크 램프율(N·m/s) 반환.
+        WLTP 0→100 kph (0→27.78 m/s) 가속 3개 구간 기반.
+        """
+        if v_veh < 16.667: # 0 ~ 60 km/h
+            return 50.5
+        elif v_veh < 22.222: # 60 ~ 80 km/h
+            return 160.9
+        elif v_veh < 27.778: # 80 ~ 100 km/h
+            return 124.3
+        # 그 이상: 마지막 값 유지... 보통은 더 감소하는 것 같기도
+        else: ## TODO -> 거동이 올바른지 다시 확인
+            return 124.3 # N·m/s
     
     # return slip angular speed
     # take gear number, w_eng, T_eng
@@ -170,8 +196,8 @@ class HEV(gym.Env):
 
     ## efficiency of transmission
     def eta_transmission(self, n_gear, T_trans, w_trans):
-        ## TODO put eff map here
-        eff = 0.9
+        ## put eff map here to make result better
+        eff = 0.95
         return eff
     
     ## take rpm and return maximum available torque
@@ -246,30 +272,24 @@ class HEV(gym.Env):
             P_bsg = T_bsg * w_bsg / self.eta_motor(w_bsg, T_bsg)
         # eta_motor != 0 이라는 전제
 
-        # 3. Battery Model (need function V_oc, R_0 from pack supplier)
+        # 3. Battery Model
         root = self.V_oc(SoC)**2 - 4 * self.R_0(SoC) * P_bsg # verify root >= 0
         I_t = (self.V_oc(SoC) - np.sqrt(root if root >= 0 else 0)) / (2 * self.R_0(SoC))
         # C_nom = Ah이기 때문에 분자도 A * hour 로 통일시켜줌
-        battey_voltage = 270
+        battey_voltage = 270 # Voltage
         DIFF = ((self.step_size / 3600) * battey_voltage * (I_t + car.I_aux)) / (car.battery_cap * 1000)
         SoC -= DIFF # Wh / Wh -> %
-        # print("---------------------------------------------------------------------")
-        # print("T_bsg : ", T_bsg, "w_bsg : ", w_bsg)
-        # print("P_bsg : ", P_bsg)
-        # print(f"current : {I_t}, resistance : {self.R_0(SoC)}, voltage : {self.V_oc(SoC)}")
-        # print("SoC : ", SoC, "DIFF : ", DIFF)
-        # print("")
 
-        # 4. Torque Converter Model
-        T_pt = T_bsg + T_eng - T_brk # from the figure 2 block diagram
-        T_tc = T_pt
+        # # 4. Torque Converter Model
+        # T_pt = T_bsg + T_eng - T_brk # from the figure 2 block diagram
+        # T_tc = T_pt
 
-        T_trans = self.gear_ratio(n_g) * T_tc
-        T_out = car.tau_fdr * T_trans
-        if(T_trans >= 0):
-            T_out *= self.eta_transmission(n_g, T_trans, w_trans)
-        else:
-            T_out /= self.eta_transmission(n_g, T_trans, w_trans)
+        # T_trans = self.gear_ratio(n_g) * T_tc
+        # T_out = car.tau_fdr * T_trans
+        # if(T_trans >= 0):
+        #     T_out *= self.eta_transmission(n_g, T_trans, w_trans)
+        # else:
+        #     T_out /= self.eta_transmission(n_g, T_trans, w_trans)
 
         return float(SoC), float(m_fuel_dot), next_w_eng
     
@@ -294,68 +314,85 @@ class HEV(gym.Env):
     
 
     # Define a function to split the power between the engine and the BSG
-    def power_split_HCU(self, ratio, SoC, T_req, w_eng):
+    # T_req_wheel : 최종적으로 바퀴에 걸려야하는 토크
+    # n_gear : 현재 속도에 대응하는 기어
+    # w_eng : 현재 엔진 속도 (rad/s)
+    # v_veh : 현재 속도 (m/s)
+    def power_split_HCU(self, ratio, SoC, T_req_wheel, w_eng, v_veh, n_gear):
         #** T_req = T_eng(pos) + T_bsg(neg, pos) - T_brk(pos) **#
+        # T_req_wheel = T_req_crank * (gear ratio * tau_fdr) * eff        
 
-        # 1. Clip the ratio to the realistic range [0, 1]
-        real_ratio = max(min(ratio, 1.0), 0.0)
-        
-        # 2. Compute maximum engine torque from current w_eng(rad/s)
-        T_max_eng = self.get_engine_max_torque(w_eng)   # positive
-        T_max_bsg = self.get_motor_max_torque(w_eng)    # positive
-        T_max_regen = self.get_motor_max_break(w_eng)   # minus
+        car = self.car_config
+        tau_total = self.gear_ratio(n_gear) * self.car_config.tau_fdr
+        eta_trans = 0.95 ## TODO -> transmission eff 함수의 값 : n_gear, w_bsg, T_bsg에 따라서 변동하는 값
 
-        # 3. T_eng 계산 (Soc 상태 고려)
-        if SoC < 0.2:
-            T_eng = T_max_eng # 일부로 max로 넣어서, soc를 회생제동 시킴 -> 충전
+        # 1. calculate T_req_crank from T_req_wheel
+        # 최종적으로 바퀴에 걸려야하는 토크 -> 크랭크 축이 내야하는 토크
+        if T_req_wheel >= 0:
+            T_req_crank = T_req_wheel / (tau_total * eta_trans)
         else:
-            T_eng = T_max_eng * real_ratio
+            T_req_crank = T_req_wheel * eta_trans / tau_total
 
+        # 2. Compute maximum motor torque from current w_eng(rad/s)
+        w_bsg = car.tau_belt * w_eng
+        T_max_bsg_shaft = self.get_motor_max_torque(w_bsg)   # 모터축, positive
+        T_max_regen_shaft = self.get_motor_max_break(w_bsg)  # 모터축, negative
 
-        ## case 1 : 제동 상황
-        if(T_req < 0):
-            # motor regen 제동만으로 충분한 경우 (T_max_regen 크기 > required)
-            if SoC >= 1.0: # 배터리 완충
+        # 3. convert max torque from motor shaft to crankshaft
+        # 모터축 -> 엔진축(크랭크축)으로 변환. 나중에 합치기 위해서
+        def to_crank(T_m):
+            return T_m * car.tau_belt * car.eta_belt if T_m >= 0 \
+                else T_m / (car.tau_belt * car.eta_belt)
+
+        # 4. get all max torque @ crankshaft        
+        T_max_bsg =  to_crank(T_max_bsg_shaft)   # 크랭크축, positive
+        T_max_reg =  to_crank(T_max_regen_shaft) # 크랭크축, negative
+        T_max_eng = self.get_engine_max_torque(w_eng)   # 크랭크축, positive
+
+        # 5. Clip the ratio to the realistic range [0, 1]
+        clipped_ratio = np.clip(ratio, 0, 1)
+        T_eng = T_max_eng * clipped_ratio # eng torque 결정
+
+        # 6. T_eng 계산 (Soc 상태 고려)
+        if SoC < 0.2:
+            T_eng = T_max_eng # 만약 SoC가 20% 이하라면 action 무시하고 엔진을 최대 토크로 사용
+
+        # 7. Torque slew rate limit
+        # T_eng -> 이전 토크 대비 delta_T 만큼만 바뀔 수 있음
+        delta_T = self.get_engine_ramp_rate(v_veh) * self.step_size # N·m/s
+        T_eng = float(np.clip(
+            T_eng, 
+            self.prev_T_eng - delta_T,
+            self.prev_T_eng + delta_T))
+        self.prev_T_eng = T_eng # 현재 토크 저장 (다음 step에 이전 토크로 사용 예정)
+
+        # ------------------------- torque split cases -------------------------- #
+        T_bsg = T_req_crank - T_eng
+        T_brk = 0.0
+
+        ## case 1 : 가속 상황
+        if(T_bsg >= 0): # T_req_crank >= T_eng, 모터 동력도 필요
+            if(T_bsg > T_max_bsg): # BSG 토크가 낼 수 있는 최대치 넘어가는 경우
+                T_bsg = T_max_bsg
+                T_eng = np.clip(T_req_crank - T_bsg, 0.0, T_max_eng) # BSG를 max 만큼 끌어쓰고, 나머지는 T_eng으로 다시 채움 (T_req를 bsg max + eng max로 못할 수는 없음)
+            # else : 그대로
+        else: # T_bsg < 0, 감속 OR 회생 제동 상황
+            if SoC >= 0.98: # 배터리 완충 -> 회생제동 불가
                 T_bsg = 0 # 회생제동 절대 X
-                T_brk = T_eng - T_req
-            else: # 배터리 충전 가능
-                if(T_max_regen < (T_req - T_eng)):
-                    T_bsg = T_req - T_eng
-                    T_brk = 0
-                # motor regen 제동으로는 부족한 경우
-                else:
-                    T_bsg = T_max_regen
-                    T_brk = (T_eng + T_bsg) - T_req
+                T_brk = -T_bsg
+            elif(np.abs(T_bsg) >= np.abs(T_max_reg)): # 회생제동으로는 부족한 경우
+                T_brk = -(T_bsg - T_max_reg)
+                T_bsg = T_max_reg
 
-        ## case 2. 가속 상황
-        else: # T_req >= 0
-            T_brk = 0 # brake 사용할 필요 X
+        def crank_to_motor(T_crank):
+            tau = self.car_config.tau_belt
+            eta = self.car_config.eta_belt
+            return (T_crank / (tau*eta) if T_crank >= 0
+                    else T_crank *  (tau*eta))
+        
+        T_bsg_shaft = crank_to_motor(T_bsg) # 크랭크축 -> 모터축으로 변환
 
-            # 4. Compute BSG torque requirement
-            T_bsg = T_req - T_eng
-
-            if(T_bsg > 0): # 배터리 소모
-                if(T_bsg > T_max_bsg): # BSG 토크가 낼 수 있는 최대치 넘어가는 경우
-                    T_bsg = T_max_bsg
-                    T_eng = T_req - T_bsg # BSG를 max 만큼 끌어쓰고, 나머지는 T_eng으로 다시 채움 (T_req를 bsg max + eng max로 못할 수는 없음)
-                #else : do nothing 
-            else: # T_bsg < 0, 회생제동, 충전
-                if SoC >= 1.0: # 배터리 완충 (충전 불가)
-                   T_bsg = 0
-                   T_eng = T_req
-                else:  # 충전 가능
-                    if(T_bsg < T_max_regen): # BSG 충전 역토크의 최대치를 넘어가는 경우
-                        T_bsg = T_max_regen
-                        T_brk = T_bsg + T_eng - T_req
-                    #else : do nothing
-
-        # 5. Enforce engine on/off switching constraints:
-        ## TODO 엔진토크가 0보다 커지면 engine ON / 2.5초내로 engine의 on off를 바꾸는건 불가능함 (있으면 좋은 것)
-        ## idle RPM 이상으로는 나오도록 토크가 걸려야함
-        ## engine off limit을 주거나 안주거나 적용을 선택할 수 있도록 -> 학습 양상을 보고 넣을지 결정.
-        ## engine을 키면 한N(~3)초 정도는 다시 토크를 0 으로 설정하는건 불가능하게 제약 필요 **
-
-        return T_eng, T_bsg, T_brk
+        return T_eng, T_bsg_shaft, T_brk
 
 
     #------------------------- Step function -------------------------- #
@@ -379,6 +416,7 @@ class HEV(gym.Env):
         n_gear = self.gear_number(prev_v_veh)
 
         # 기어 결정 이후 request torque 계산
+        # T_req = "최종적으로 바퀴에 걸려야하는 토크"
         T_req = self.req_T_calculation(prev_v_veh, current_v_veh, n_gear, self.step_size)
 
         #-------------------------------- 2. HCU phase -------------------------------- #
@@ -387,7 +425,11 @@ class HEV(gym.Env):
         ratio = action # action unpack (확장 가능)
 
         # T_req = T_eng(pos) + T_bsg(neg, pos) - T_brk(pos)
-        T_eng, T_bsg, T_brk = self.power_split_HCU(ratio, SoC_t0, T_req, prev_w_eng)
+        # 모든 토크는 본인의 축 기준!!
+        # T_eng -> crankshaft, T_bsg -> motor shaft
+        T_eng, T_bsg, T_brk = self.power_split_HCU(ratio, SoC_t0, T_req, prev_w_eng, prev_v_veh, n_gear)
+        
+        # to fit dimension
         if (type(T_eng) == np.ndarray):
             T_eng = T_eng[0]
         if (type(T_bsg) == np.ndarray):
@@ -399,16 +441,13 @@ class HEV(gym.Env):
 
         #----------------------------- reward definition phase ------------------------ #
         # 새로운 state에 대해서 reward를 계산
-        # TODO soc, fuel 둘다 0 ~ -1 사이에 놓이게
         soc_reward = - ((abs(self.soc_base - SoC_t1))**2)*10 # 멀어질 수록 더 -가 커짐
         fuel_reward = - fuel_dot_t1*100 # 클수록 안좋음
+        total_reward = 1 + soc_reward + fuel_reward # 원하는 target에 따라서 tuning 할 수 있음 reward 에 배치
 
         #----------------------------- state update phase ------------------------ #
         new_state = np.array([SoC_t1, fuel_dot_t1, current_v_veh, next_w_eng], dtype=np.float64)
         self.state = new_state
-
-        # TODO : reward는 -1 ~ 1 사이로 -> 이게 가장 중요
-        total_reward = 1 + soc_reward + fuel_reward # 원하는 target에 따라서 tuning 할 수 있음 reward 에 배치
 
         #--------------------------------- for debugging ------------------------ #
         info = {

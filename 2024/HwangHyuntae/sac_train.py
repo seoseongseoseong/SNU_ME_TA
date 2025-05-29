@@ -155,7 +155,7 @@ if __name__ == "__main__":
         model = SAC.load(model_file, env=env)
         model.load_replay_buffer(buffer_file)
     else:
-        model = SAC("MlpPolicy", env=env, verbose=1)
+        model = SAC("MlpPolicy", env=env, verbose=0)
 
     # set callbacks
     callbacks = CallbackList([progress_cb, info_cb, eps_chkpt_cb])

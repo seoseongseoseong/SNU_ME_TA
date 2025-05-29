@@ -1,8 +1,33 @@
+import argparse
 import json
 import os
 import matplotlib.pyplot as plt
 
-def plot_results(test_name="wltp", specific_name = None):
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="SAC으로 HEV 학습을 시작하거나 재개합니다."
+    )
+    parser.add_argument(
+        "--test-name", "--test",
+        type=str,
+        default="wltp",
+        choices=["udds", "wltp", "hwfet"],
+        help="choose test cycle name"
+    )
+    parser.add_argument(
+        "--target-eps", "--eps",
+        type=int,
+        default="0",
+        help="choose which episode to test"
+    )
+    parser.add_argument(
+        "--only-reward",
+        action="store_true",
+        help="total_reward만 출력하고 plot은 표시하지 않음"
+    )
+    return parser.parse_args()
+
+def plot_results(test_name="wltp", specific_name = None, only_reward=False):
     if specific_name is not None:
         json_name = specific_name
     else:
@@ -31,6 +56,11 @@ def plot_results(test_name="wltp", specific_name = None):
     total_reward = [entry["total_reward"] for entry in data]
     # fuel_dot_values = [entry["fuel_dot"] for entry in data]
 
+    total_reward_sum = sum([r for r in total_reward if r is not None])
+
+    if only_reward:
+        print(f"Total Reward: {total_reward_sum:.2f}")
+        return  # 그래프 그리기 생략
 
     fig, ax1 = plt.subplots(figsize=(10, 5))
 
@@ -60,12 +90,13 @@ def plot_results(test_name="wltp", specific_name = None):
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
 
-    plt.title("Result: T_eng, T_bsg and SoC vs Time")
+    plt.title(f"Result: T_eng, T_bsg and SoC vs Time  |  Total Reward: {total_reward_sum:.2f}")
     plt.grid(True)
     plt.show()
 
 
 if __name__ == "__main__":
-    specific_name = "results_wltp.json"
+    args = parse_args()
+    specific_name = f"results_{args.test_name}_{args.target_eps}.json"
     # specific_name = "final_episode_info.json"
-    plot_results(specific_name=specific_name)
+    plot_results(specific_name=specific_name, only_reward=args.only_reward)

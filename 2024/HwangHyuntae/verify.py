@@ -29,12 +29,17 @@ def parse_args():
         default="0",
         help="choose which episode to test"
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="cycle 실행 중 progress를 출력합니다."
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    chkpt_dir = os.path.join(".", "checkpoints", "model")
+    chkpt_dir = os.path.join(".", "checkpoints_new", "model")
     if args.target_eps != 0:
         latest_eps = args.target_eps
     else:
@@ -52,7 +57,8 @@ if __name__ == "__main__":
     print(f"Start verifying target episode {latest_eps}")
 
     # 1. 학습된 모델 불러오기
-    model = SAC.load(last_trained_file)
+    model = SAC.load(last_trained_file, custom_objects={"lr_schedule": lambda _: 0.0003})
+    
 
     # 2. Urban 사이클(또는 다른 cycle)을 사용하는 환경 생성
     # profile_filename 인자를 'urban.csv'로 전달합니다.
@@ -66,12 +72,17 @@ if __name__ == "__main__":
     obs, info = env.reset()
     done = False
     total_reward = 0
+    step_count = 0
 
     while not done:
         # 에이전트의 행동 예측 (deterministic=True로 선택)
         action, _states = model.predict(obs, deterministic=True)
         obs, reward, done, truncated, info = env.step(action)
         total_reward += reward
+
+        step_count += 1
+        if args.verbose and step_count % 10 == 0:
+            print(f"Running step: {step_count} / time: {info.get('time', '?')}")
 
         # 각 스텝의 결과를 딕셔너리로 저장
         results.append({
@@ -93,7 +104,7 @@ if __name__ == "__main__":
     print("Total Reward:", total_reward)
 
     # JSON 파일로 저장 (indent=4로 가독성 있게 저장)
-    output_file = os.path.join("json_data", "results_" + args.test_name + ".json") 
+    output_file = os.path.join("json_data", "results_" + args.test_name + "_" + str(args.target_eps) + ".json") 
     with open(output_file, "w") as f:
         json.dump(results, f, indent=4)
 
